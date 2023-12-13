@@ -1,8 +1,8 @@
 server:
   disable: false
-  http_listen_port: 0
+  http_listen_port: 8080
   grpc_listen_port: 0
-  log_level: error
+  log_level: info
 positions:
   filename: /opt/mqtt_promtail/positions.yaml
 clients:
@@ -30,5 +30,5 @@ scrape_configs:
       - targets:
           - localhost
         labels:
-          job: mqtt_logger
+          job: mqtt_loki
           host_hostname: ${MQTT_LOGGER_HOST_HOSTNAME}
