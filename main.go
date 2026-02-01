@@ -114,6 +114,34 @@ var (
 		},
 		[]string{"topic"},
 	)
+
+	mqttConnectionsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "mqtt_logger_connections_total",
+			Help: "Total number of MQTT connections established",
+		},
+	)
+
+	mqttReconnectionsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "mqtt_logger_reconnections_total",
+			Help: "Total number of MQTT reconnections",
+		},
+	)
+
+	mqttConnectionUptime = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "mqtt_logger_connection_uptime_seconds",
+			Help: "Current MQTT connection uptime in seconds",
+		},
+	)
+
+	mqttPingTimeoutsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "mqtt_logger_ping_timeouts_total",
+			Help: "Total number of MQTT ping timeouts",
+		},
+	)
 )
 
 func init() {
@@ -125,6 +153,10 @@ func init() {
 	prometheus.MustRegister(lokiPushDuration)
 	prometheus.MustRegister(lokiRetriesTotal)
 	prometheus.MustRegister(messagesInBatch)
+	prometheus.MustRegister(mqttConnectionsTotal)
+	prometheus.MustRegister(mqttReconnectionsTotal)
+	prometheus.MustRegister(mqttConnectionUptime)
+	prometheus.MustRegister(mqttPingTimeoutsTotal)
 }
 
 func main() {
@@ -162,6 +194,30 @@ func main() {
 	var isInitialConnection sync.Once
 	var initialConnectionDone sync.Mutex
 	var hasConnectedBefore bool
+	var connectionStartTime time.Time
+	var connectionStartTimeMu sync.Mutex
+
+	// Track connection status for uptime calculation
+	var isConnected bool
+	var isConnectedMu sync.Mutex
+
+	// Start goroutine to update connection uptime metric
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			connectionStartTimeMu.Lock()
+			isConnectedMu.Lock()
+			if !connectionStartTime.IsZero() && isConnected {
+				uptime := time.Since(connectionStartTime).Seconds()
+				mqttConnectionUptime.Set(uptime)
+			} else {
+				mqttConnectionUptime.Set(0)
+			}
+			isConnectedMu.Unlock()
+			connectionStartTimeMu.Unlock()
+		}
+	}()
 
 	// Create a function to subscribe to topics (used both initially and on reconnect)
 	subscribeToTopics := func(client mqtt.Client, isReconnect bool) {
@@ -200,13 +256,23 @@ func main() {
 		initialConnectionDone.Lock()
 		if hasConnectedBefore {
 			isReconnect = true
+			mqttReconnectionsTotal.Inc()
 		} else {
 			hasConnectedBefore = true
 		}
 		initialConnectionDone.Unlock()
 
+		// Track connection start time
+		connectionStartTimeMu.Lock()
+		connectionStartTime = time.Now()
+		connectionStartTimeMu.Unlock()
+
+		mqttConnectionsTotal.Inc()
 		log.Println("MQTT client connected")
 		mqttConnectionStatus.Set(1)
+		isConnectedMu.Lock()
+		isConnected = true
+		isConnectedMu.Unlock()
 		if config.Debug {
 			log.Printf("DEBUG: MQTT connection established (reconnect: %v)", isReconnect)
 		}
@@ -218,6 +284,22 @@ func main() {
 	opts.OnConnectionLost = func(client mqtt.Client, err error) {
 		log.Printf("MQTT connection lost: %v", err)
 		mqttConnectionStatus.Set(0)
+		isConnectedMu.Lock()
+		isConnected = false
+		isConnectedMu.Unlock()
+
+		// Reset connection start time
+		connectionStartTimeMu.Lock()
+		connectionStartTime = time.Time{}
+		connectionStartTimeMu.Unlock()
+		mqttConnectionUptime.Set(0)
+
+		// Check if this was a ping timeout
+		if err != nil && strings.Contains(err.Error(), "pingresp not received") {
+			mqttPingTimeoutsTotal.Inc()
+			log.Printf("MQTT ping timeout detected")
+		}
+
 		if config.Debug {
 			log.Printf("DEBUG: MQTT connection lost, will attempt to reconnect")
 		}
