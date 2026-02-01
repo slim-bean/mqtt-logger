@@ -1,16 +1,32 @@
-FROM grafana/promtail:2.9.3
+# Build stage
+FROM golang:1.21-alpine AS builder
 
-RUN apt-get update && apt-get install -y dumb-init mosquitto-clients vim
+WORKDIR /build
 
-RUN mkdir /mqtt-logger
+# Copy go mod files
+COPY go.mod go.sum* ./
 
-COPY config.yaml /mqtt-logger
-COPY start.sh /mqtt-logger
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY main.go .
+
+# Build the binary (ARCH will be set by buildx for multi-arch builds)
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -o mqtt-logger -ldflags '-w -s' main.go
+
+# Runtime stage
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates tzdata
 
 WORKDIR /mqtt-logger
 
-RUN chmod a+x *.sh
+# Copy binary from builder
+COPY --from=builder /build/mqtt-logger .
 
-ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+# Set timezone (can be overridden via TZ env var)
+ENV TZ=America/New_York
 
-CMD ["/mqtt-logger/start.sh"]
+ENTRYPOINT ["./mqtt-logger"]
